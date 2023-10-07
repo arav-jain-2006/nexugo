@@ -86,6 +86,6 @@ async def reload(ctx,file):
 async def main():
     async with client:
         await load_extensions()
-        await client.start("ODI5NTQyNjI0MDQxMTA3NDY3.GUgSLW.BKVRoVWbpZScuDG9zwpnlCzDszw0YX-roUtJ3A")
+        await client.start(os.environ['TOKEN'])
         
 asyncio.run(main())
