@@ -1,0 +1,326 @@
+import discord, asyncio, datetime, time, json, random
+from discord.ext import commands, tasks
+#from youtube_dl import YoutubeDL
+from yt_dlp import YoutubeDL
+#import nest_asyncio
+
+
+class Music(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+        #all the music related stuff
+        self.is_playing = {}#False
+        self.is_paused = {}#False
+
+        # 2d array containing [song, channel]
+        self.music_queue = {}#['e']
+        self.YDL_OPTIONS = {
+            'format': 'bestaudio',
+            'quiet': True
+        }  #, 'noplaylist': 'True'}
+        self.FFMPEG_OPTIONS = {
+            'before_options':
+            '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'options': '-vn'
+        }
+        self.volume = {}#1.0
+        self.loop = {}#False
+        self.vc = {}#None
+        self.GUILD_VC_TIMER = {}
+        self.starttime = {}
+        self.pausetime = {}
+        #nest_asyncio.apply()
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild):
+        self.init_id(guild.id)
+    
+    @commands.Cog.listener()
+    async def on_ready(self):
+        for guild in self.bot.guilds:
+            self.init_id(guild.id)
+
+    def init_id(self, id):
+        self.is_playing[id] = False
+        self.is_paused[id] = False
+        self.music_queue[id] = ['e']
+        self.volume[id] = 1.0
+        self.loop[id] = False
+        self.vc[id] = None
+
+    #searching the item on youtube
+    def search_yt(self, item):
+        keystokeep = ['webpage_url','thumbnail','title','duration']
+        with YoutubeDL(self.YDL_OPTIONS) as ydl:
+            try:
+                if 'http' in item:
+                    if 'playlist?list' in item:
+                        l = []
+                        ext = ydl.extract_info(item,download=False)
+                        list = ext['entries']
+                        for info in list:
+                            for i in info['formats']:
+                                if i['format_note'] != 'storyboard':
+                                    source = i['url']
+                                    break
+                            l.append({'source':source,'info':{key:value for key,value in info.items() if key in keystokeep}})
+                        l.insert(0,{'info':{'title':ext['title'],'webpage_url':ext['webpage_url'],'thumbnail':l[0]['info']['thumbnail']}})
+                        return l
+                    else:
+                        info = ydl.extract_info(item,download=False)
+                        for i in info['formats']:
+                            if i['format_note'] != 'storyboard':
+                                source = i['url']
+                                break
+                        info = {key:value for key,value in info.items() if key in keystokeep}
+                else:
+                    info = ydl.extract_info(f"ytsearch:{item}", download=False)['entries'][0]
+                    for i in info['formats']:
+                        print(i['format_note'])
+                        if i['format_note'] != 'storyboard':
+                            source = i['url']
+                            break
+                    info = {key:value for key,value in info.items() if key in keystokeep}
+            except Exception:
+                return False
+        return {'source': source, 'info': info}
+
+    async def play_music(self, id):
+        if not self.loop[id] or self.music_queue[id][0]=='e':
+       		self.music_queue[id].pop(0)
+        else:
+            self.music_queue[id] = self.music_queue[id][1:]+self.music_queue[id][:1]
+            
+        if len(self.music_queue[id]) == 0:
+            self.music_queue[id].append('e')
+            self.is_playing[id] =  False
+            return
+              
+        if len(self.music_queue[id]) > 0:
+            self.is_playing[id] = True
+            #print(self.music_queue)
+            m_url = self.music_queue[id][0][0]['source']
+            current = self.music_queue[id][0]
+            #try to connect to voice channel if you are not already connected
+            if self.vc[id] == None or not self.vc[id].is_connected():
+                self.vc[id] = await self.music_queue[id][0][1].connect()
+                #in case we fail to connect
+                if self.vc[id] == None:
+                    await current[2].send("Could not connect to the voice channel")
+                    return
+            else:
+                await self.vc[id].move_to(self.music_queue[id][0][1]) 
+            
+            embedVar = discord.Embed(title="Now Playing", color=0x3C86E4)
+            embedVar.description = f"[{current[0]['info']['title']}]({current[0]['info']['webpage_url']})"
+            embedVar.set_footer(text=f"Added by {current[2].author.name}#{current[2].author.discriminator}",icon_url=current[2].author.display_avatar)
+            embedVar.set_thumbnail(url=current[0]['info']['thumbnail'])
+            await current[2].channel.send(embed=embedVar)
+            
+           	
+            #remove the first element as you are currently playing it
+            self.starttime[id] = datetime.datetime.now()
+            #loop = asyncio.get_event_loop()
+            try:
+                source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(m_url, **self.FFMPEG_OPTIONS), self.volume[id])
+                self.vc[id].play(source, after=lambda e: asyncio.run_coroutine_threadsafe(self.play_music(id), self.bot.loop))
+            except Exception as e:
+                print(e)
+        else:
+            self.is_playing[id] = False   
+        
+    @commands.command(name="play", description="Plays a selected song from youtube")
+    async def play(self, ctx, *args):
+        query = " ".join(args)
+        if ctx.author.voice is None:
+            await ctx.send("You're not connected to a voice channel.")
+            return
+        
+        voice_channel = ctx.author.voice.channel
+        
+        if self.is_paused[ctx.guild.id]:
+            self.is_paused[ctx.guild.id] = False
+            self.is_playing[ctx.guild.id] = True
+            self.starttime[ctx.guild.id] += datetime.datetime.now() - self.pausetime[ctx.guild.id]
+            await ctx.channel.send(f":play_pause: **Resuming player.**")
+            self.vc[ctx.guild.id].resume()
+        else:
+            message = await ctx.send("**Downloading songs...**")
+            song = self.search_yt(query)
+            if type(song) == type(True):
+                await message.edit(content="Could not download the song. Incorrect format try another keyword. This could be due to a livestream format.")
+            else:
+                if 'playlist?list' in query:
+                    for s in song[1:]:
+                        self.music_queue[ctx.guild.id].append([s,voice_channel,ctx])
+                else:
+                	self.music_queue[ctx.guild.id].append([song, voice_channel,ctx])
+                
+                await message.edit(content='**Downloaded.**',delete_after=3)
+                if self.is_playing[ctx.guild.id] == False:
+                    await self.play_music(ctx.guild.id)
+                else:
+                    if 'playlist?list' in query:
+                        song = song[0]
+                    embedVar = discord.Embed(title=song['info']['title'],url=song['info']['webpage_url'],color=0x3C86E4)
+                    embedVar.set_footer(text=f"Added by {ctx.author.name}#{ctx.author.discriminator}",icon_url=ctx.author.display_avatar)
+                    embedVar.set_thumbnail(url=song['info']['thumbnail'])
+                    await ctx.channel.send(f"**{song['info']['title']}** successfully added!")
+                    await ctx.channel.send(embed=embedVar)
+	
+    @commands.command(name="loop", description="Enables/Disables looping queue.")
+    async def loop(self,ctx):
+        if self.loop[ctx.guild.id]:
+            self.loop[ctx.guild.id] = False
+            await ctx.channel.send("Looping music queue disabled.")
+        else:
+            self.loop[ctx.guild.id] = True
+            await ctx.channel.send("Looping music queue enabled.")
+        
+    @commands.command(name="pause", description="Pauses the current song being played")
+    async def pause(self, ctx, *args):
+        if self.is_playing[ctx.guild.id]:
+            self.is_playing[ctx.guild.id] = False
+            self.is_paused[ctx.guild.id] = True
+            self.pausetime[ctx.guild.id] = datetime.datetime.now()
+            with open('prefixes.json', 'r') as f:
+                prefixes = json.load(f)
+            prefix = prefixes[str(ctx.guild.id)]
+            await ctx.channel.send(f":pause_button: **Player paused.** Type {prefix}resume to resume.")
+            self.vc[ctx.guild.id].pause()
+        elif self.is_paused[ctx.guild.id]:
+            self.is_paused[ctx.guild.id] = False
+            self.is_playing[ctx.guild.id] = True
+            self.starttime[ctx.guild.id] += datetime.datetime.now() - self.pausetime[ctx.guild.id]
+            await ctx.channel.send(f":play_pause: **Resuming player.**")
+            self.vc[ctx.guild.id].resume()
+
+    @commands.command(name="resume", description="Resumes playing with the discord bot")
+    async def resume(self, ctx, *args):
+        if self.is_paused[ctx.guild.id]:
+            self.is_paused[ctx.guild.id] = False
+            self.is_playing[ctx.guild.id] = True
+            self.starttime[ctx.guild.id] += datetime.datetime.now() - self.pausetime[ctx.guild.id]
+            await ctx.channel.send(f":play_pause: **Resuming player.**")
+            self.vc[ctx.guild.id].resume()
+
+    @commands.command(name="skip", description="Skips the current song being played")
+    async def skip(self, ctx):
+        if self.vc[ctx.guild.id] == None or not self.vc[ctx.guild.id]:
+            return
+        if not self.is_playing[ctx.guild.id] or len(self.music_queue[ctx.guild.id])<2:
+            await ctx.send("There is no song to skip to.")
+            return
+        self.vc[ctx.guild.id].stop()
+        await ctx.channel.send(f":track_next: **Skipped.**")
+        #try to play next in the queue if it exists
+        #await self.play_music()
+
+    @commands.command(name="queue", description="Displays the current songs in queue")
+    async def queue(self, ctx):
+        n = len(self.music_queue[ctx.guild.id])
+        embedVar = discord.Embed(title=f"Music Queue ({n-1} tracks)",color=0x3C86E4)
+        retval = ''
+        if n>0 and self.music_queue[ctx.guild.id] !=['e']:
+            if self.is_paused[ctx.guild.id]:
+                time_delta = self.music_queue[ctx.guild.id][0][0]['info']['duration']-int((self.pausetime[ctx.guild.id]-self.starttime[ctx.guild.id]).total_seconds())
+            else:
+            	time_delta = self.music_queue[ctx.guild.id][0][0]['info']['duration']-int((datetime.datetime.now()-self.starttime[ctx.guild.id]).total_seconds())
+            time_left = str(time.strftime("%H:%M:%S", time.gmtime(time_delta))).removeprefix('00:')
+            retval += f"**Now Playing**\n[{self.music_queue[ctx.guild.id][0][0]['info']['title']}]({self.music_queue[ctx.guild.id][0][0]['info']['webpage_url']}) {time_left} left\n\n"
+        if n<=1:
+            retval += "`There's no song in the queue`\n"
+        for i in range(1, n):
+            # display a max of 10 songs in the current queue
+            if (i > 10): break
+            song = self.music_queue[ctx.guild.id][i][0]['info']
+            retval += f"`{i}` [{song['title']}]({song['webpage_url']}) {time.strftime('%H:%M:%S', time.gmtime(song['duration'])).removeprefix('00:')}\n"
+
+        
+        embedVar.description = retval
+        embedVar.set_footer(text=f"Looping: {'Enabled' if self.loop[ctx.guild.id] else 'Disabled'}")
+        await ctx.channel.send(embed=embedVar)
+     
+    @commands.command(name="shuffle",description="Shuffles the music queue.")
+    async def shuffle(self,ctx):
+        self.music_queue[ctx.guild.id] = self.music_queue[ctx.guild.id][0:1] + random.sample(self.music_queue[ctx.guild.id][1:],len(self.music_queue[ctx.guild.id])-1) 
+        await ctx.channel.send("Queue shuffled successfully!")
+        
+    
+    @commands.command(name="clear", description="Clears the queue or a specified track.")
+    async def clear(self, ctx, index=None):
+        if not index:
+            l = len(self.music_queue[ctx.guild.id])-1
+            del self.music_queue[ctx.guild.id][1:]
+            await ctx.send(f"Cleared queue ({l} tracks).")
+        else:
+            n = int(index)
+            if n>=len(self.music_queue[ctx.guild.id]) or n<=0:
+                await ctx.send(f'The index {n} does not exist in the queue.')
+                return
+            song = self.music_queue[ctx.guild.id].pop(n)
+            await ctx.send(f"**{song[0]['info']['title']}** deleted from queue!")
+   	
+    @commands.command(name="volume", aliases=["vol"], help="Stops the music.")
+    async def volume(self,ctx,*args):
+        if 100<int(args[0]) or 0>int(args[0]):
+            await ctx.send("Volume can only be between 1-100.")
+            return
+        self.volume[ctx.guild.id] = float(int(args[0])/100)
+        self.vc[ctx.guild.id].source.volume = self.volume[ctx.guild.id]
+        await ctx.send(f"Volume set to {int(args[0])} :loud_sound:")
+
+    @commands.command(name="leave", aliases=["dc"], description="Kick the bot from VC")
+    async def dc(self, ctx):
+        self.is_playing[ctx.guild.id] = False
+        self.is_paused[ctx.guild.id] = False
+        self.music_queue[ctx.guild.id] = ['e']
+        await self.vc[ctx.guild.id].disconnect()
+    
+    @commands.command(name="mfix", description="fix")
+    async def mfix(self,ctx):
+        self.is_playing[before.channel.guild.id]= False
+        self.is_paused[before.channel.guild.id] = False
+        await voice.disconnect()
+        await self.play_music(ctx.guild.id)
+        
+    @commands.Cog.listener()
+    async def on_voice_state_update(self,member, before, after):
+        # if event is triggered by the bot? return
+        if member.id == self.bot.user.id:
+            return
+        #print(member.id, before.channel)
+        # when before.channel != None that means user has left a channel
+        if before.channel != None:
+            voice = discord.utils.get(self.bot.voice_clients , channel__guild__id = before.channel.guild.id)
+            # voice is voiceClient and if it's none? that means the bot is not in an y VC of the Guild that triggerd this event 
+            if voice == None:
+                return
+
+            # if VC left by the user is not equal to the VC that bot is in? then return
+            if voice.channel.id != before.channel.id:
+                return
+            
+            # if VC has only 1 member (including the bot)
+            if len(voice.channel.members) <= 1:
+                self.GUILD_VC_TIMER[before.channel.guild.id] = 0
+                while True:
+                    await asyncio.sleep(1)
+                    self.GUILD_VC_TIMER[before.channel.guild.id] += 1
+
+                    # if vc has more than 1 member or bot is already disconnectd ? break
+                    if len(voice.channel.members) >= 2 or not voice.is_connected():
+                        break
+                        
+                    # if bot has been alone in the VC for more than 30 seconds ? disconnect
+                    if self.GUILD_VC_TIMER[before.channel.guild.id] >= 60:
+                        self.is_playing[before.channel.guild.id]= False
+                        self.is_paused[before.channel.guild.id] = False
+                        self.music_queue[before.channel.guild.id] = ['e']
+                        await voice.disconnect()
+                        return
+            
+            
+async def setup(client):
+    await client.add_cog(Music(client))
