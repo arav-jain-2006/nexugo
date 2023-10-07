@@ -3,7 +3,6 @@ asyncio
 pillow
 requests
 regex
-yt_dlp
 nest-asyncio
 pynacl
 mcstats
