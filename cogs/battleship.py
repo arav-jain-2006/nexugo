@@ -426,7 +426,7 @@ class Battleship(commands.Cog):
 
     @app_commands.command(description="Challenge a user to a battleship match.")
     @commands.guild_only()
-    async def battleship(self, interaction, opponent: Member = None):
+    async def battleship(self, interaction, opponent: Member):
         # await interaction.response.defer()
 
         if opponent.bot:
