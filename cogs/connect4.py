@@ -151,7 +151,7 @@ class Connect4(commands.Cog):
 
     @app_commands.command(description="Challenge a user to a connect-4 game.")
     @commands.guild_only()
-    async def connect4(self, interaction, opponent: Member = None):
+    async def connect4(self, interaction, opponent: Member):
         # await interaction.response.defer()
         if opponent.bot:
             await interaction.response.send_message('You cannot challenge a bot...', delete_after=5, ephemeral=True)
